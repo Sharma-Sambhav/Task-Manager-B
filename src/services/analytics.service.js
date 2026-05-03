@@ -1,4 +1,5 @@
 import { Project } from "../models/project.models.js";
+import { Task } from "../models/task.models.js";
 import { APIError } from "../utils/APIerror.js";
 import mongoose from "mongoose";
 
@@ -54,13 +55,26 @@ const getDateRanges = () => {
 const getOverviewAnalyticsService = async (projectId, userId) => {
     const project = await verifyProjectAccess(projectId, userId);
 
-    // TODO: Replace with actual Task queries when Task model exists
+    // Get actual task statistics
+    const tasks = await Task.find({ project: projectId });
+    
     const taskStats = {
-        total: 0,
-        byStatus: { toDo: 0, inProgress: 0, done: 0 },
-        byPriority: { low: 0, medium: 0, high: 0 },
-        overdue: 0
+        total: tasks.length,
+        byStatus: {
+            toDo: tasks.filter(t => t.status === 'to_do').length,
+            inProgress: tasks.filter(t => t.status === 'in_progress').length,
+            done: tasks.filter(t => t.status === 'done').length
+        },
+        byPriority: {
+            low: tasks.filter(t => t.priority === 'low').length,
+            medium: tasks.filter(t => t.priority === 'medium').length,
+            high: tasks.filter(t => t.priority === 'high').length
+        },
+        overdue: tasks.filter(t => t.isOverdue).length
     };
+
+    const completionRate = taskStats.total > 0 ? 
+        Math.round((taskStats.byStatus.done / taskStats.total) * 100) : 0;
 
     const analytics = {
         project: {
@@ -86,8 +100,8 @@ const getOverviewAnalyticsService = async (projectId, userId) => {
             }))
         },
         tasks: taskStats,
-        completionRate: taskStats.total > 0 ? (taskStats.byStatus.done / taskStats.total * 100).toFixed(2) : 0,
-        progress: taskStats.total > 0 ? (taskStats.byStatus.done / taskStats.total * 100).toFixed(2) : 0
+        completionRate: `${completionRate}%`,
+        progress: `${completionRate}%`
     };
 
     return analytics;
@@ -97,9 +111,33 @@ const getOverviewAnalyticsService = async (projectId, userId) => {
 const getHealthMetricsService = async (projectId, userId) => {
     const project = await verifyProjectAccess(projectId, userId);
 
-    // TODO: Replace with actual Task aggregation
+    // Get actual task data
+    const tasks = await Task.find({ project: projectId });
     const now = new Date();
     const daysRemaining = project.endDate ? Math.ceil((project.endDate - now) / (1000 * 60 * 60 * 24)) : null;
+
+    const taskMetrics = {
+        total: tasks.length,
+        completed: tasks.filter(t => t.status === 'done').length,
+        inProgress: tasks.filter(t => t.status === 'in_progress').length,
+        toDo: tasks.filter(t => t.status === 'to_do').length,
+        overdue: tasks.filter(t => t.isOverdue).length,
+        completionRate: tasks.length > 0 ? Math.round((tasks.filter(t => t.status === 'done').length / tasks.length) * 100) : 0,
+        onTimeDeliveryRate: 0 // TODO: Calculate based on due dates
+    };
+
+    // Calculate health scores
+    const completionHealth = taskMetrics.completionRate;
+    const timelineHealth = daysRemaining !== null ? (daysRemaining > 0 ? Math.min(100, (daysRemaining / 30) * 100) : 0) : 100;
+    const teamHealth = Math.min(100, (project.members.length / 3) * 100); // Optimal team size is 3+
+    const overallHealth = Math.round((completionHealth + timelineHealth + teamHealth) / 3);
+
+    // Calculate risk score
+    let riskScore = 0;
+    if (taskMetrics.overdue > 0) riskScore += (taskMetrics.overdue / taskMetrics.total) * 40;
+    if (daysRemaining !== null && daysRemaining < 7) riskScore += 30;
+    if (project.members.length < 2) riskScore += 20;
+    if (taskMetrics.completionRate < 50) riskScore += 20;
 
     const health = {
         projectInfo: {
@@ -109,27 +147,26 @@ const getHealthMetricsService = async (projectId, userId) => {
             endDate: project.endDate,
             daysRemaining
         },
-        taskMetrics: {
-            total: 0,
-            completed: 0,
-            inProgress: 0,
-            toDo: 0,
-            overdue: 0,
-            completionRate: 0,
-            onTimeDeliveryRate: 0
-        },
+        taskMetrics,
         healthScore: {
-            overall: 0,
-            completionHealth: 0,
-            timelineHealth: daysRemaining !== null ? (daysRemaining > 0 ? 100 : 0) : 100,
-            teamHealth: (project.members.length > 0 ? 100 : 0)
+            overall: overallHealth,
+            completionHealth,
+            timelineHealth,
+            teamHealth
         },
-        riskScore: 0,
-        isOnTrack: true,
+        riskScore: Math.min(Math.round(riskScore), 100),
+        isOnTrack: riskScore < 50 && completionHealth > 30,
         alerts: []
     };
 
     // Add alerts based on conditions
+    if (taskMetrics.overdue > 0) {
+        health.alerts.push({
+            type: "error",
+            message: `${taskMetrics.overdue} task(s) are overdue and require immediate attention`
+        });
+    }
+
     if (daysRemaining !== null && daysRemaining < 7 && daysRemaining > 0) {
         health.alerts.push({
             type: "warning",
@@ -137,10 +174,24 @@ const getHealthMetricsService = async (projectId, userId) => {
         });
     }
 
+    if (daysRemaining !== null && daysRemaining < 0) {
+        health.alerts.push({
+            type: "error",
+            message: "Project has exceeded its deadline"
+        });
+    }
+
     if (project.members.length < 2) {
         health.alerts.push({
             type: "info",
-            message: "Consider adding more team members"
+            message: "Consider adding more team members to distribute workload"
+        });
+    }
+
+    if (taskMetrics.total === 0) {
+        health.alerts.push({
+            type: "info",
+            message: "No tasks have been created yet. Start by defining project objectives."
         });
     }
 
@@ -151,46 +202,151 @@ const getHealthMetricsService = async (projectId, userId) => {
 const getTeamPerformanceService = async (projectId, userId) => {
     const project = await verifyProjectAccess(projectId, userId);
 
-    // TODO: Replace with actual Task queries per member
-    const memberPerformance = project.members.map(member => ({
-        userId: member._id,
-        name: `${member.firstName} ${member.lastName}`,
-        email: member.email,
-        isCreator: member._id.toString() === project.createdBy._id.toString(),
-        stats: {
-            totalAssigned: 0,
-            completed: 0,
-            inProgress: 0,
-            toDo: 0,
-            overdue: 0,
-            completionRate: 0,
-            averageCompletionTime: 0,
-            onTimeDeliveryRate: 0,
-            productivityScore: 0,
-            tasksCompletedThisWeek: 0,
-            tasksCompletedThisMonth: 0,
-            lastActivityDate: null,
-            isActive: false
-        }
-    }));
+    // Get all tasks for the project
+    const tasks = await Task.find({ project: projectId })
+        .populate('assignedTo', 'firstName lastName email')
+        .populate('createdBy', 'firstName lastName email');
 
+    // Calculate member performance
+    const memberPerformance = project.members.map(member => {
+        const memberTasks = tasks.filter(t => 
+            t.assignedTo && t.assignedTo._id.toString() === member._id.toString()
+        );
+        
+        const completed = memberTasks.filter(t => t.status === 'done').length;
+        const inProgress = memberTasks.filter(t => t.status === 'in_progress').length;
+        const toDo = memberTasks.filter(t => t.status === 'to_do').length;
+        const overdue = memberTasks.filter(t => t.isOverdue).length;
+        const totalAssigned = memberTasks.length;
+        
+        const completionRate = totalAssigned > 0 ? Math.round((completed / totalAssigned) * 100) : 0;
+        const productivityScore = Math.max(0, completionRate - (overdue * 10)); // Penalty for overdue tasks
+        
+        // Calculate recent activity
+        const now = new Date();
+        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        
+        const tasksCompletedThisWeek = memberTasks.filter(t => 
+            t.status === 'done' && t.completedAt && new Date(t.completedAt) >= weekAgo
+        ).length;
+        
+        const tasksCompletedThisMonth = memberTasks.filter(t => 
+            t.status === 'done' && t.completedAt && new Date(t.completedAt) >= monthAgo
+        ).length;
+        
+        const lastActivity = memberTasks
+            .filter(t => t.updatedAt)
+            .sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+        
+        return {
+            userId: member._id,
+            name: `${member.firstName} ${member.lastName}`,
+            email: member.email,
+            isCreator: member._id.toString() === project.createdBy._id.toString(),
+            stats: {
+                totalAssigned,
+                completed,
+                inProgress,
+                toDo,
+                overdue,
+                completionRate,
+                averageCompletionTime: 0, // TODO: Calculate from task completion times
+                onTimeDeliveryRate: 0, // TODO: Calculate from due dates
+                productivityScore,
+                tasksCompletedThisWeek,
+                tasksCompletedThisMonth,
+                lastActivityDate: lastActivity ? lastActivity.updatedAt : null,
+                isActive: tasksCompletedThisWeek > 0 || (lastActivity && new Date(lastActivity.updatedAt) >= weekAgo)
+            }
+        };
+    });
+
+    // Calculate team velocity
+    const now = new Date();
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - now.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+    
+    const lastWeekStart = new Date(weekStart);
+    lastWeekStart.setDate(weekStart.getDate() - 7);
+    
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    const currentWeekCompleted = tasks.filter(t => 
+        t.status === 'done' && t.completedAt && new Date(t.completedAt) >= weekStart
+    ).length;
+    
+    const currentWeekCreated = tasks.filter(t => 
+        new Date(t.createdAt) >= weekStart
+    ).length;
+    
+    const currentWeekInProgress = tasks.filter(t => 
+        t.status === 'in_progress'
+    ).length;
+    
+    const lastWeekCompleted = tasks.filter(t => 
+        t.status === 'done' && t.completedAt && 
+        new Date(t.completedAt) >= lastWeekStart && new Date(t.completedAt) < weekStart
+    ).length;
+    
+    const lastWeekCreated = tasks.filter(t => 
+        new Date(t.createdAt) >= lastWeekStart && new Date(t.createdAt) < weekStart
+    ).length;
+    
+    const currentMonthCompleted = tasks.filter(t => 
+        t.status === 'done' && t.completedAt && new Date(t.completedAt) >= monthStart
+    ).length;
+    
+    const currentMonthCreated = tasks.filter(t => 
+        new Date(t.createdAt) >= monthStart
+    ).length;
+    
+    // Calculate velocity trend
+    let velocityTrend = "stable";
+    if (currentWeekCompleted > lastWeekCompleted) velocityTrend = "increasing";
+    else if (currentWeekCompleted < lastWeekCompleted) velocityTrend = "decreasing";
+    
     const teamVelocity = {
-        currentWeek: { tasksCompleted: 0, tasksCreated: 0, tasksInProgress: 0 },
-        lastWeek: { tasksCompleted: 0, tasksCreated: 0 },
-        currentMonth: { tasksCompleted: 0, tasksCreated: 0 },
-        averageWeeklyCompletion: 0,
-        velocityTrend: "stable",
-        burndownRate: 0
+        currentWeek: {
+            tasksCompleted: currentWeekCompleted,
+            tasksCreated: currentWeekCreated,
+            tasksInProgress: currentWeekInProgress
+        },
+        lastWeek: {
+            tasksCompleted: lastWeekCompleted,
+            tasksCreated: lastWeekCreated
+        },
+        currentMonth: {
+            tasksCompleted: currentMonthCompleted,
+            tasksCreated: currentMonthCreated
+        },
+        averageWeeklyCompletion: Math.round((currentWeekCompleted + lastWeekCompleted) / 2),
+        velocityTrend,
+        burndownRate: currentWeekInProgress > 0 ? Math.round((currentWeekCompleted / currentWeekInProgress) * 100) : 0
     };
+    
+    // Find top performer
+    const activeMembers = memberPerformance.filter(m => m.stats.isActive).length;
+    const topPerformer = memberPerformance
+        .filter(m => m.stats.totalAssigned > 0)
+        .sort((a, b) => b.stats.productivityScore - a.stats.productivityScore)[0];
+    
+    const averageProductivity = memberPerformance.length > 0 ? 
+        Math.round(memberPerformance.reduce((sum, m) => sum + m.stats.productivityScore, 0) / memberPerformance.length) : 0;
 
     return {
         memberPerformance,
         teamVelocity,
         summary: {
             totalMembers: project.members.length,
-            activeMembers: 0,
-            topPerformer: null,
-            averageProductivity: 0
+            activeMembers,
+            topPerformer: topPerformer ? {
+                userId: topPerformer.userId,
+                name: topPerformer.name,
+                score: topPerformer.stats.productivityScore
+            } : null,
+            averageProductivity
         }
     };
 };
@@ -437,24 +593,69 @@ const getRiskAssessmentService = async (projectId, userId) => {
 const getTrendAnalysisService = async (projectId, userId) => {
     const project = await verifyProjectAccess(projectId, userId);
 
-    // TODO: Calculate from historical task data
+    // Get tasks with completion data
+    const tasks = await Task.find({ project: projectId });
+    
+    const now = new Date();
+    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+    const twoMonthsAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
+    
+    // Current completion rate
+    const currentCompletionRate = tasks.length > 0 ? 
+        Math.round((tasks.filter(t => t.status === 'done').length / tasks.length) * 100) : 0;
+    
+    // Last week completion rate (tasks that existed a week ago)
+    const tasksExistingLastWeek = tasks.filter(t => new Date(t.createdAt) <= weekAgo);
+    const lastWeekCompletionRate = tasksExistingLastWeek.length > 0 ? 
+        Math.round((tasksExistingLastWeek.filter(t => t.status === 'done').length / tasksExistingLastWeek.length) * 100) : 0;
+    
+    // Last month completion rate
+    const tasksExistingLastMonth = tasks.filter(t => new Date(t.createdAt) <= monthAgo);
+    const lastMonthCompletionRate = tasksExistingLastMonth.length > 0 ? 
+        Math.round((tasksExistingLastMonth.filter(t => t.status === 'done').length / tasksExistingLastMonth.length) * 100) : 0;
+    
+    // Velocity calculations
+    const currentWeekCompleted = tasks.filter(t => 
+        t.status === 'done' && t.completedAt && new Date(t.completedAt) >= weekAgo
+    ).length;
+    
+    const lastWeekCompleted = tasks.filter(t => 
+        t.status === 'done' && t.completedAt && 
+        new Date(t.completedAt) >= twoWeeksAgo && new Date(t.completedAt) < weekAgo
+    ).length;
+    
+    // Determine trends
+    const completionTrend = currentCompletionRate > lastWeekCompletionRate ? "up" : 
+                           currentCompletionRate < lastWeekCompletionRate ? "down" : "stable";
+    
+    const velocityTrend = currentWeekCompleted > lastWeekCompleted ? "up" : 
+                          currentWeekCompleted < lastWeekCompleted ? "down" : "stable";
+    
+    const completionChange = lastWeekCompletionRate > 0 ? 
+        Math.round(((currentCompletionRate - lastWeekCompletionRate) / lastWeekCompletionRate) * 100) : 0;
+    
+    const velocityChange = lastWeekCompleted > 0 ? 
+        Math.round(((currentWeekCompleted - lastWeekCompleted) / lastWeekCompleted) * 100) : 0;
+
     return {
         completionRate: {
-            current: 0,
-            lastWeek: 0,
-            lastMonth: 0,
-            trend: "stable",
-            changePercentage: 0
+            current: currentCompletionRate,
+            lastWeek: lastWeekCompletionRate,
+            lastMonth: lastMonthCompletionRate,
+            trend: completionTrend,
+            changePercentage: Math.abs(completionChange)
         },
         velocity: {
-            current: 0,
-            lastWeek: 0,
-            trend: "stable",
-            changePercentage: 0
+            current: currentWeekCompleted,
+            lastWeek: lastWeekCompleted,
+            trend: velocityTrend,
+            changePercentage: Math.abs(velocityChange)
         },
         teamActivity: {
             current: project.members.length,
-            lastWeek: project.members.length,
+            lastWeek: project.members.length, // TODO: Track member additions/removals
             trend: "stable"
         }
     };

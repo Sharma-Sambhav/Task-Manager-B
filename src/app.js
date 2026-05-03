@@ -32,12 +32,14 @@ import userRouter from "./routes/user.routes.js";
 import adminRouter from "./routes/admin.routes.js";
 import projectRouter from "./routes/project.routes.js";
 import analyticsRouter from "./routes/analytics.routes.js";
+import taskRouter from "./routes/task.routes.js";
 
 // Register Routes
 app.use("/api/v1/user", userRouter);
 app.use("/api/v1/admin", adminRouter);
 app.use("/api/v1/projects", projectRouter);
 app.use("/api/v1/projects", analyticsRouter);
+app.use("/api/v1", taskRouter);
 
 // 404 handler - must be after all routes
 import notFound from "./middlewares/notFound.middleware.js";
