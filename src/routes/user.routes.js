@@ -1,20 +1,15 @@
 import { Router } from "express";
-import { registerUser,loginUser } from "../controllers/user.controller.js";
-import { upload } from "../middlewares/multer.middleware.js";
+import { registerUser, loginUser, getCurrentUser, logoutUser } from "../controllers/user.controller.js";
+import { verifyJWT } from "../middlewares/auth.middleware.js";
 
-const router = Router() 
+const router = Router();
 
-//user Auth operations
+// Public routes
+router.route("/register").post(registerUser);
+router.route("/login").post(loginUser);
 
-router.route("/register").post(upload.fields([
-    {
-        name:"avatar",
-        maxCount:1
-    }
-]),registerUser)
-router.route("/login/gi").post(loginUser)
+// Protected routes
+router.route("/me").get(verifyJWT, getCurrentUser);
+router.route("/logout").post(verifyJWT, logoutUser);
 
-//user crud operations 
-
-
-export default router 
+export default router;

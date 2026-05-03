@@ -1,1 +1,1 @@
-export const DBName = 'exampleDBIndibusAPI'  
+export const DBName = 'taskmanager'  

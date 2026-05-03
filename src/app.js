@@ -27,14 +27,21 @@ app.use(express.static("public"));
 app.use(cookieParser());
 
 
-// Import Routes and State it's Functions in Try Catch Block
+// Import Routes
 import userRouter from "./routes/user.routes.js";
-try {
-    app.use("/api/v1/user", userRouter);
-} catch (error) {
-    console.log('File: app.js', 'Line 35:', error);
-    throw new Error("Error Occured in Routes", error);
-}
+import adminRouter from "./routes/admin.routes.js";
+
+// Register Routes
+app.use("/api/v1/user", userRouter);
+app.use("/api/v1/admin", adminRouter);
+
+// 404 handler - must be after all routes
+import notFound from "./middlewares/notFound.middleware.js";
+app.use(notFound);
+
+// Global error handler - must be last
+import errorHandler from "./middlewares/errorHandler.middleware.js";
+app.use(errorHandler);
 
 
 export default app 

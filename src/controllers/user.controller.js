@@ -1,170 +1,184 @@
-// import { Token } from "../models/tokens.models.js";
 import { User } from "../models/user.models.js";
 import { APIError } from "../utils/APIerror.js";
 import { APIresponse } from "../utils/APIresponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import { uploadOnCloudinary } from "../utils/cloudinary.js";
-import {v4 as uuid} from "uuid"
-
-const generateAccessTokenInstance = async(userId)=>{
-    try {
-        const user = await User.findById(userId)
-        const accessToken = user.generateAccessToken()
-        return {accessToken}
-    } catch (error) {
-        throw new APIError(500,"Something Went wrong while generating access and refresh Token")
-    }
-}
 
 const registerUser = asyncHandler(async (req, res) => {
     try {
         const { firstName, lastName, email, password } = req.body;
-        const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-        //check for all fields 
-        if(
-            [firstName, lastName,email,password].some((field)=> field?.trim() === "")
-        ){
-            throw new APIError(400,"No Empty Field is allowed")
-        }
-        
-        //check if user already exists 
 
-        const existingUser = await User.findOne({email:email}) 
-        if(existingUser){
-            throw new APIError(400,"User already exists")
+        // Validate all fields
+        if ([firstName, lastName, email, password].some((field) => field?.trim() === "")) {
+            throw new APIError(400, "All fields are required");
         }
 
-        //upload the avatar on cloudinary 
-        let avatarLocalPath 
-        if(req.files && Array.isArray(req.files.avatar) && req.files.avatar.length > 0){
-            avatarLocalPath = req.files.avatar[0].path
+        // Check if user already exists
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            throw new APIError(400, "User already exists");
         }
 
-        const avatar = await uploadOnCloudinary(avatarLocalPath)
-        
-        //generate uuid for user 
-        const uuidString = uuid()
-
-        //create the user 
-        const createdUser = await User.create({
+        // Create user (password will be hashed by pre-save hook, status defaults to "pending")
+        const user = await User.create({
             firstName,
             lastName,
             email,
-            password,
-            avatar:avatar?.url || ""
-        })
+            password
+        });
 
-        //generate access token 
-        const {accessToken} = await generateAccessTokenInstance(createdUser._id)
-        // create a token for the user 
-        const createdToken = await Token.create({
-            accessToken:accessToken,
-            uuid:uuidString,
-            latestipaddress:ip,
-            ipaddresses:[
-                {
-                    ipaddress:ip
-                }
-            ]
-        })
-        const options = {
-            httpOnly: true,
-            secure:true
-        }
+        // Get user without password
+        const createdUser = await User.findById(user._id).select("-password");
 
         return res
             .status(201)
-            .cookie("token",createdToken.uuid, options)
             .json(
                 new APIresponse(
                     201,
                     {
-                        token:createdToken.uuid,
+                        user: createdUser
                     },
-                    "User Created Successfully",
+                    "Registration successful! Your account is pending admin approval. You will be able to login once approved."
                 )
-            )
+            );
     } catch (error) {
-        console.log('File: user.controller.js', 'Line 15:', error);
-        throw new APIError(500,"Something went wrong while registering the user")
+        console.log('File: user.controller.js', 'Line 44:', error);
+        throw new APIError(error.statusCode || 500, error?.message || "Something went wrong while registering user");
     }
-})
-
+});
 
 const loginUser = asyncHandler(async (req, res) => {
     try {
         const { email, password } = req.body;
-        console.log("email-",email);
-        const cleanedEmail = email.replace(/s+/g, ""); // removes all whitespace
-        console.log("Cleaned Email:", cleanedEmail);
-        const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
-        //check for all fields
-        if(
-            [email,password].some((field)=> field?.trim() === "")
-        ){
-            throw new APIError(400,"No Empty Field is allowed")
-        }
-        
 
-        //check if user exists or not
-
-        const user = await User.findOne({ email: cleanedEmail });
-        if(!user){
-            throw new APIError(400,"User does not exists")
+        // Validate fields
+        if ([email, password].some((field) => field?.trim() === "")) {
+            throw new APIError(400, "Email and password are required");
         }
-        //check if Password is correct ot not
-        const isPasswordCorrect = await user.isPasswordCorrect(password)
-        if(!isPasswordCorrect){
-            throw new APIError(400,"Password is incorrect")
-        }
-        
-      
-            const generatedToken = await generateAccessTokenInstance(user._id)
-            //create a token for the user
-            const createdToken = await Token.create({
-                accessToken:generatedToken.accessToken,
-                uuid:uuid(),
-                latestipaddress:ip,
-                ipaddresses:[
-                    {
-                        ipaddress:ip
-                    }
-                ]
-            })
-            const tokenUUID = createdToken.uuid
-        
 
+        // Check if user exists
+        const user = await User.findOne({ email });
+        if (!user) {
+            throw new APIError(401, "Invalid credentials");
+        }
+
+        // Check if password exists (for debugging)
+        if (!user.password) {
+            console.error('User password is missing in database:', user.email);
+            throw new APIError(500, "Account configuration error. Please contact support.");
+        }
+
+        // Check user status
+        if (user.status === "pending") {
+            throw new APIError(403, "Your account is pending approval. Please wait for admin approval.");
+        }
+
+        if (user.status === "rejected") {
+            throw new APIError(403, "Your account has been rejected. Please contact admin.");
+        }
+
+        // Verify password
+        try {
+            const isPasswordCorrect = await user.isPasswordCorrect(password);
+            if (!isPasswordCorrect) {
+                throw new APIError(401, "Invalid credentials");
+            }
+        } catch (bcryptError) {
+            console.error('Password verification error:', bcryptError);
+            throw new APIError(500, "Authentication error. Please try again or contact support.");
+        }
+
+        // Generate access token
+        const accessToken = user.generateAccessToken();
+
+        // Get user without password
+        const loggedInUser = await User.findById(user._id).select("-password");
+
+        // Cookie options - httpOnly prevents JavaScript access (secure!)
         const options = {
             httpOnly: true,
-            secure:true
-        }
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            path: "/"
+        };
+
+        console.log("🍪 Setting httpOnly cookie");
+
+        // IMPORTANT: Token is ONLY in httpOnly cookie, NOT in response body
         return res
             .status(200)
-            .cookie("token",tokenUUID, options)
+            .cookie("token", accessToken, options)
             .json(
                 new APIresponse(
                     200,
                     {
-                        token:createdToken.uuid,
+                        user: loggedInUser
                     },
-                    "User Logged In Successfully",
+                    "User logged in successfully"
                 )
-            )
+            );
     } catch (error) {
-        console.log('File: user.controller.js', 'Line 99:', error);
-        throw new APIError(500,"Something went wrong while logging in the user")
-    }
-})
-
-
-const changePassword = asyncHandler(async (req,res)=>{
-    try {
-    } catch (error) {
+        console.log('File: user.controller.js', 'Line 119:', error);
         
+        // If it's already an APIError, throw it as is
+        if (error.statusCode) {
+            throw error;
+        }
+        
+        // Otherwise wrap it
+        throw new APIError(500, "Something went wrong while logging in");
     }
-})
+});
+
+const getCurrentUser = asyncHandler(async (req, res) => {
+    try {
+        console.log("📡 /user/me called, user from req:", req.user?.email);
+        
+        return res
+            .status(200)
+            .json(
+                new APIresponse(
+                    200,
+                    {
+                        user: req.user
+                    },
+                    "User fetched successfully"
+                )
+            );
+    } catch (error) {
+        console.log('File: user.controller.js', 'Line 145:', error);
+        throw new APIError(500, "Something went wrong while fetching user");
+    }
+});
+
+const logoutUser = asyncHandler(async (req, res) => {
+    try {
+        const options = {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            path: "/"
+        };
+
+        return res
+            .status(200)
+            .clearCookie("token", options)
+            .json(
+                new APIresponse(
+                    200,
+                    {},
+                    "User logged out successfully"
+                )
+            );
+    } catch (error) {
+        console.log('File: user.controller.js', 'Line 171:', error);
+        throw new APIError(500, "Something went wrong while logging out");
+    }
+});
+
 export {
     registerUser,
     loginUser,
-    changePassword
-}
+    getCurrentUser,
+    logoutUser
+};
