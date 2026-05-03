@@ -8,7 +8,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: process.env.NODE_ENV === "production" ? "your link goes here" : "http://localhost:3000",
+    origin: process.env.NODE_ENV === "production" ? "https://taskmanager.sambhav.click" : "http://localhost:3000",
     credentials: true,
   })
 );

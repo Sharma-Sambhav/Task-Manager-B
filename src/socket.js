@@ -3,7 +3,7 @@ import server from "./server.js";
 
 const io = new Server(server, {
     cors: {
-        origin: process.env.NODE_ENV === 'production' ? "https://shady.odrly.com" : "http://localhost:3000",
+        origin: process.env.NODE_ENV === 'production' ? "https://taskmanager.sambhav.click" : "http://localhost:3000",
         credentials: true
     }
 });
